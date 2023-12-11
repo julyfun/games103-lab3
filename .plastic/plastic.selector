@@ -1,0 +1,4 @@
+repository "games103-3-2@hoaledonax@cloud.cn"
+  path "/"
+    br "/main"
+    co "/main"
