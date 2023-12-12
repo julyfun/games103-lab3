@@ -35,7 +35,7 @@ Lab1 中的碰撞写法可能会导致粒子在碰撞表面来回振荡，使静
 - `get_stress_tensor_mooney_rivlin_wiki()`: 维基百科给出的 Rilvin-Peridyno 能量公式形式与上面的不同，参见 https://en.wikipedia.org/wiki/Mooney%E2%80%93Rivlin_solid
 - `get_stress_tensor_fung_peridyno()` Fung 模型，参见 https://github.com/peridyno/peridyno/blob/7a32a01e33f13d299b77ffd9b6112e2bdff32c46/src/Dynamics/Cuda/Peridynamics/EnergyDensityFunction.h#L557
 
-PPT 给的公式似乎有点问题，因此参考了维基百科和仓库 https://github.com/peridyno/peridyno 中不同模型对能量的定义，并对特征值求导得到弹性张量。
+能量 $W$ 公式正确性其中一个检验方法是，检验形变梯度 $F$ 为单位矩阵时，$W$ 和求得的弹性张量是否为 $0$，不是 $0$ 的话基本直接就会爆炸哦。这样看来 PPT 给的公式似乎有点问题，因此参考了维基百科和仓库 https://github.com/peridyno/peridyno 中不同模型对能量的定义，并对特征值求导得到弹性张量。
 
 ### Bonus 2. 交互式拖拽
 
