@@ -8,31 +8,56 @@ using System.Linq.Expressions;
 using Unity.VisualScripting;
 using System.Runtime.InteropServices;
 using System.Xml.Serialization;
+using System.Linq;
+
+public class TriIndex
+{
+    public TriIndex(int x, int y, int z)
+    {
+        this.index[0] = x;
+        this.index[1] = y;
+        this.index[2] = z;
+        this.index.OrderBy(i => i).ToArray();
+    }
+    public int[] index = new int[3];
+}
 
 public class FVM : MonoBehaviour
 {
-    [Range(0.0f, 1.0f)]
-    public float col_restitution = 0.5f;
-    [Range(0.00166f, 0.002222f)]
-    public float dt = 0.00166f;
+    public static int selecting_cnt = 0;
+
+    [ShowOnly] public float floor_restitution = 0.5f;
+    [ShowOnly] public bool enable_stiction = true;
+    [ShowOnly] public float dt = 0.00166f;
     [ShowOnly] public float damp = 0.999f;
-    [Range(1, 10)]
-    public int calculation_per_frame = 3;
+    [ShowOnly] public int calculation_per_frame = 3;
+    [ShowOnly] public float gravity = 9.8f;
+    [Header("在切换弹性模型时是否自动设置为默认系数")]
+    public bool auto_set_stiffness_when_model_changed = true;
     [Range(0.05f, 20.0f)]
     public float mass = 1;
     [Range(0f, 30000f)]
     public float stiffness_0 = 20000.0f;
-    [Range(0f, 8000f)]
+    [Range(0f, 20000f)]
     public float stiffness_1 = 5000.0f;
     [Range(0, 5000f)]
     public float stiffness_2 = 2000.0f;
     [Range(0, 50f)]
     public float stiffness_3 = 10.0f;
-    public bool use_hyper = false;
+    public bool use_hyper_model = false;
     [Range(0, 4)]
-    public int hyper_model = 0;
-    [ShowOnly] public String hyper_model_name;
-    private Dictionary<int, String> hyper_model_name_map = new Dictionary<int, String>()
+    public int model_idx = 0;
+    [ShowOnly] public String model_name;
+    int last_model_used = 0;
+    private Dictionary<int, float[]> model_default_params = new Dictionary<int, float[]> {
+        {0, new float[]{20000, 5000, 0, 0}},
+        {1, new float[]{20000, 14000, 0, 0}},
+        {2, new float[]{5000, 5000, 500, 0}},
+        {3, new float[]{5000, 5000, 2000, 0}},
+        {4, new float[]{5000, 2000, 2000, 2}},
+    };
+
+    private Dictionary<int, String> model_name_map = new Dictionary<int, String>()
     {
         {0, "StVK"},
         {1, "NeoHookean"},
@@ -40,15 +65,14 @@ public class FVM : MonoBehaviour
         {3, "MooneyRivlin-Wiki"},
         {4, "Fung"},
     };
-    public int selected_x_id = -1;
-    public float z_when_selected = 0f;
-    public bool mouse_pressed = false;
-    public bool use_superficial_collision = true;
-    public float average_edge_length = 0f;
+    [ShowOnly] public int selected_x_id = -1;
+    [ShowOnly] public float z_when_selected = 0f;
+    [ShowOnly] public float average_edge_length = 0f;
     float radius = 0f;
 
     int[] Tet;
     int tet_number;         //The number of tetrahedra
+    TriIndex[] those_tri_index; // 计算碰撞用
 
     Vector3[] outer_force;
     Vector3[] V;
@@ -61,10 +85,8 @@ public class FVM : MonoBehaviour
     Vector3[] V_sum;
     int[] ref_count;
 
-    SVD svd = new SVD();
-    bool debug = false;
+    SVD svd_solver = new SVD();
 
-    // Start is called before the first frame update
     void Start()
     {
         this.GetComponent<LineRenderer>().enabled = false;
@@ -132,24 +154,39 @@ public class FVM : MonoBehaviour
         //Create triangle mesh.
         Vector3[] vertices = new Vector3[tet_number * 12];
         int vertex_number = 0;
+        var multi_tri_index = new List<TriIndex>();
         for (int tet = 0; tet < tet_number; tet++)
         {
+            // Tet[tet * 4 + 0] 这个才是真的 X 的下标
             vertices[vertex_number++] = X[Tet[tet * 4 + 0]];
             vertices[vertex_number++] = X[Tet[tet * 4 + 2]];
             vertices[vertex_number++] = X[Tet[tet * 4 + 1]];
+            multi_tri_index.Add(new TriIndex(Tet[tet * 4 + 0], Tet[tet * 4 + 2], Tet[tet * 4 + 1]));
 
             vertices[vertex_number++] = X[Tet[tet * 4 + 0]];
             vertices[vertex_number++] = X[Tet[tet * 4 + 3]];
             vertices[vertex_number++] = X[Tet[tet * 4 + 2]];
+            multi_tri_index.Add(new TriIndex(Tet[tet * 4 + 0], Tet[tet * 4 + 3], Tet[tet * 4 + 2]));
 
             vertices[vertex_number++] = X[Tet[tet * 4 + 0]];
             vertices[vertex_number++] = X[Tet[tet * 4 + 1]];
             vertices[vertex_number++] = X[Tet[tet * 4 + 3]];
+            multi_tri_index.Add(new TriIndex(Tet[tet * 4 + 0], Tet[tet * 4 + 1], Tet[tet * 4 + 3]));
 
             vertices[vertex_number++] = X[Tet[tet * 4 + 1]];
             vertices[vertex_number++] = X[Tet[tet * 4 + 2]];
             vertices[vertex_number++] = X[Tet[tet * 4 + 3]];
+            multi_tri_index.Add(new TriIndex(Tet[tet * 4 + 1], Tet[tet * 4 + 2], Tet[tet * 4 + 3]));
         }
+        // 排序后去重
+        this.those_tri_index =
+            multi_tri_index
+                .OrderBy(i => i.index[0])
+                .ThenBy(i => i.index[1])
+                .ThenBy(i => i.index[2])
+                .Distinct()
+                .ToArray();
+        // X 居然和 transpose.position 解除绑定了
 
         int[] triangles = new int[tet_number * 12];
         for (int t = 0; t < tet_number * 4; t++)
@@ -161,9 +198,9 @@ public class FVM : MonoBehaviour
         Mesh mesh = GetComponent<MeshFilter>().mesh;
         // vertices 中一个坐标出现了好多次..
         mesh.vertices = vertices;
+        // triangles 里存的是 vertices 的下标还是 X 的下标捏
         mesh.triangles = triangles;
         mesh.RecalculateNormals();
-
 
         V = new Vector3[num_nodes];
         outer_force = new Vector3[num_nodes];
@@ -207,6 +244,8 @@ public class FVM : MonoBehaviour
         {
             this.inv_dm[i] = Build_Edge_Matrix(i).inverse;
         }
+
+        this.last_model_used = this.model_idx;
     }
 
     Matrix4x4 Build_Edge_Matrix(int tet)
@@ -336,6 +375,7 @@ public class FVM : MonoBehaviour
 
     Matrix4x4 get_stress_tensor_fung_peridyno(float lambda1, float lambda2, float lambda3)
     {
+        // https://github.com/peridyno/peridyno/blob/7a32a01e33f13d299b77ffd9b6112e2bdff32c46/src/Dynamics/Cuda/Peridynamics/EnergyDensityFunction.h#L557
         // 5000, 2000, 2000, 2
         float[] l = { lambda1, lambda2, lambda3 };
         float i1 = lambda1 * lambda1 + lambda2 * lambda2 + lambda3 * lambda3;
@@ -373,18 +413,9 @@ public class FVM : MonoBehaviour
         Matrix4x4 u_mat = Matrix4x4.zero;
         Matrix4x4 lambda_mat = Matrix4x4.zero;
         Matrix4x4 v_mat = Matrix4x4.zero;
-        SVD svd_solver = new SVD();
-        svd_solver.svd(deformation_gradient, ref u_mat, ref lambda_mat, ref v_mat);
-        if (this.debug)
-        {
-            // Debug.Log("deformation_gradient: " + deformation_gradient);
-            // Debug.Log("u_mat: " + u_mat);
-            // Debug.Log("lambda_mat: " + lambda_mat);
-            // Debug.Log("v_mat: " + v_mat);
-        }
-        // https://github.com/peridyno/peridyno/blob/7a32a01e33f13d299b77ffd9b6112e2bdff32c46/src/Dynamics/Cuda/Peridynamics/EnergyDensityFunction.h#L120
+        this.svd_solver.svd(deformation_gradient, ref u_mat, ref lambda_mat, ref v_mat);
         Matrix4x4 stress_tensor;
-        switch (this.hyper_model_name)
+        switch (this.model_name)
         {
             case "StVK":
                 stress_tensor = this.get_stress_tensor_stvk(lambda_mat[0, 0], lambda_mat[1, 1], lambda_mat[2, 2]);
@@ -402,7 +433,7 @@ public class FVM : MonoBehaviour
                 stress_tensor = this.get_stress_tensor_fung_peridyno(lambda_mat[0, 0], lambda_mat[1, 1], lambda_mat[2, 2]);
                 break;
             default:
-                throw new Exception("Unknown hyper model: " + this.hyper_model_name);
+                throw new Exception("Unknown hyper model: " + this.model_name);
         }
 
         // https://github.com/peridyno/peridyno/blob/7a32a01e33f13d299b77ffd9b6112e2bdff32c46/src/Dynamics/Cuda/Peridynamics/Module/CoSemiImplicitHyperelasticitySolver.cu#L661
@@ -414,7 +445,6 @@ public class FVM : MonoBehaviour
     {
         for (int i = 0; i < num_nodes; i++)
         {
-            // (Particle) collision with floor.
             var dis = this.X[i].y - (-3f);
             if (dis < 0f)
             {
@@ -423,9 +453,9 @@ public class FVM : MonoBehaviour
                 var v_ni = Vector3.Dot(rel_v, hit_normal) * hit_normal;
                 var v_ti = rel_v - v_ni;
                 // 切向速度衰减系数
-                var a = Mathf.Max(1 - this.col_restitution * (1 + this.col_restitution)
+                var a = Mathf.Max(1 - this.floor_restitution * (1 + this.floor_restitution)
                     * Vector3.SqrMagnitude(v_ni) / Vector3.SqrMagnitude(v_ti), 0);
-                var v_ni_new = -Mathf.Min(1f, this.col_restitution) * v_ni;
+                var v_ni_new = -Mathf.Min(1f, this.floor_restitution) * v_ni;
                 var v_ti_new = a * v_ti;
                 this.V[i] = v_ni_new + v_ti_new;
                 var x_to_be = this.X[i] - dis * hit_normal;
@@ -440,9 +470,8 @@ public class FVM : MonoBehaviour
         var collision_force = new Vector3[this.num_nodes];
         for (int i = 0; i < this.num_nodes; i++)
         {
-            // (Particle) collision with floor.
             var dis = this.X[i].y - (-3f);
-            // 一帧上一帧下怎么办
+            // 一帧上一帧下怎么办：
             // < 0 时施加弹力
             // < 0.01 时施加摩擦力
             if (dis < 0.01f)
@@ -452,9 +481,9 @@ public class FVM : MonoBehaviour
                 var v_ni = Vector3.Dot(rel_v, hit_normal) * hit_normal;
                 var v_ti = rel_v - v_ni;
                 // 切向速度衰减系数
-                var a = Mathf.Max(1 - this.col_restitution * (1 + this.col_restitution)
+                var a = Mathf.Max(1 - this.floor_restitution * (1 + this.floor_restitution)
                     * Vector3.SqrMagnitude(v_ni) / Vector3.SqrMagnitude(v_ti), 0);
-                var v_ni_new = -Mathf.Min(1f, this.col_restitution) * v_ni;
+                var v_ni_new = -Mathf.Min(1f, this.floor_restitution) * v_ni;
                 var v_ti_new = a * v_ti;
                 var v_new = v_ni_new + v_ti_new;
                 // 压力的弹力
@@ -466,26 +495,26 @@ public class FVM : MonoBehaviour
                     // 静摩擦
                     var outer_force_n = Vector3.Dot(this.outer_force[i], hit_normal) * hit_normal;
                     var outer_force_t = this.outer_force[i] - outer_force_n;
-                    if (outer_force_t.magnitude < (elastic_force * this.col_restitution).magnitude)
+                    if (outer_force_t.magnitude < (elastic_force * this.floor_restitution).magnitude)
                     {
                         collision_force[i] += -outer_force_t;
                     }
                     else
                     {
-                        collision_force[i] += -(elastic_force * this.col_restitution).magnitude * outer_force_t.normalized;
+                        collision_force[i] += -(elastic_force * this.floor_restitution).magnitude * outer_force_t.normalized;
                     }
                 }
                 else
                 {
                     // 动摩擦
-                    collision_force[i] += -(elastic_force * this.col_restitution).magnitude * v_ti.normalized;
+                    collision_force[i] += -(elastic_force * this.floor_restitution).magnitude * v_ti.normalized;
                 }
                 if (dis < 0f)
                 {
                     collision_force[i] += elastic_force;
+                    var x_to_be = this.X[i] - dis * hit_normal;
+                    this.X[i] = x_to_be;
                 }
-                var x_to_be = this.X[i] - dis * hit_normal;
-                this.X[i] = x_to_be;
             }
         }
         for (int i = 0; i < num_nodes; i++)
@@ -501,12 +530,12 @@ public class FVM : MonoBehaviour
         if (Input.GetKey(KeyCode.Space))
         {
             for (int i = 0; i < num_nodes; i++)
-                this.V[i].y += 19.6f * this.dt * (10f / this.calculation_per_frame);
+                this.V[i].y += this.gravity * this.dt;
         }
         else
         {
             for (int i = 0; i < num_nodes; i++)
-                this.V[i].y -= 9.8f * this.dt * (10f / this.calculation_per_frame);
+                this.V[i].y -= this.gravity * this.dt;
         }
 
         // F 要清空
@@ -518,21 +547,22 @@ public class FVM : MonoBehaviour
         if (this.selected_x_id != -1)
         {
             // 鼠标选中了一个点
+            var real_x = this.get_real_x();
             Vector3 mouse_pos = Input.mousePosition;
             mouse_pos.z = this.z_when_selected;
             Vector3 world_pos = Camera.main.ScreenToWorldPoint(mouse_pos);
-            float elastic_len = (world_pos - this.X[this.selected_x_id]).magnitude; // - this.radius;
+            float elastic_len = (world_pos - real_x[this.selected_x_id]).magnitude; // - this.radius;
             this.outer_force[this.selected_x_id] +=
-                (world_pos - this.X[this.selected_x_id]).normalized * elastic_len * this.mass * this.num_nodes * 9.8f;
+                (world_pos - real_x[this.selected_x_id]).normalized * elastic_len * this.mass * this.num_nodes * 9.8f;
 
             LineRenderer line_renderer = GetComponent<LineRenderer>();
             line_renderer.startColor = Color.green;
-            line_renderer.SetPositions(new Vector3[] { world_pos, this.X[this.selected_x_id] });
+            line_renderer.SetPositions(new Vector3[] { world_pos, real_x[this.selected_x_id] });
         }
 
         for (int tet = 0; tet < tet_number; tet++)
         {
-            //TODO: Deformation Gradient
+            // 形变梯度矩阵
             Matrix4x4 deformed_edge_mat = Matrix4x4.zero;
             deformed_edge_mat[3, 3] = 1f;
             for (int i = 0; i < 3; i++)
@@ -542,19 +572,11 @@ public class FVM : MonoBehaviour
             }
             var deformation_gradient = deformed_edge_mat * this.inv_dm[tet];
 
-            // this.debug = tet == 12;
-            var first_pk_stress = this.use_hyper
+            var first_pk_stress = this.use_hyper_model
                 ? this.get_first_pk_stress_hyper(deformation_gradient)
                 : this.get_first_pk_stress1(deformation_gradient);
-            if (this.debug)
-            {
-                // var first_pk_stress2 = this.get_first_pk_stress1(deformation_gradient);
-                // var first_pk_stress = this.get_first_pk_stress_hyper(deformation_gradient);
-                // Debug.Log("first_pk_stress: " + first_pk_stress);
-                // Debug.Log("first_pk_stress2: " + first_pk_stress2);
-            }
 
-            // Elastic Force
+            // 牛顿第三定律
             var f_mat = Mats.dot(-1f / (6f * this.inv_dm[tet].determinant), first_pk_stress * this.inv_dm[tet].transpose);
             var f = new Vector3[4];
             for (int i = 0; i < 3; i++)
@@ -568,7 +590,7 @@ public class FVM : MonoBehaviour
             }
         }
 
-        if (this.use_superficial_collision) this.superficial_collision(); else this.particle_collision();
+        if (this.enable_stiction) this.superficial_collision(); else this.particle_collision();
 
         for (int i = 0; i < num_nodes; i++)
         {
@@ -603,23 +625,41 @@ public class FVM : MonoBehaviour
         }
     }
 
+    public Vector3[] get_real_x()
+    {
+        Vector3[] ret = new Vector3[this.num_nodes];
+        for (int i = 0; i < this.num_nodes; i++)
+        {
+            ret[i] = this.X[i] + this.transform.position;
+        }
+        return ret;
+    }
+
+    public Vector3[] get_real_v()
+    {
+        return this.V;
+    }
+
+    public TriIndex[] get_tri_index()
+    {
+        return this.those_tri_index;
+    }
+
     void handle_mouse_movement()
     {
         // 鼠标
         if (Input.GetMouseButtonDown(0))
         {
-            this.mouse_pressed = true;
             Ray ray = Camera.main.ScreenPointToRay(Input.mousePosition);
             float closest_z = float.MaxValue;
-            this.selected_x_id = -1;
+            int pre_selected_x_id = this.selected_x_id;
+            var real_x = this.get_real_x();
             for (int i = 0; i < this.X.Length; i++)
             {
-                // float proj_dis = Vector3.Dot(ray.direction.normalized, this.X[i] - ray.origin);
-                // float dis = Vector3.Distance(ray.origin + proj_dis * ray.direction.normalized, this.X[i]);
-                float dis = Vector3.Cross(ray.direction, this.X[i] - ray.origin).magnitude;
+                float dis = Vector3.Cross(ray.direction, real_x[i] - ray.origin).magnitude;
                 if (dis < this.average_edge_length)
                 {
-                    float z = Camera.main.WorldToScreenPoint(this.X[i]).z;
+                    float z = Camera.main.WorldToScreenPoint(real_x[i]).z;
                     if (closest_z > z)
                     {
                         closest_z = z;
@@ -629,33 +669,62 @@ public class FVM : MonoBehaviour
                     }
                 }
             }
+            if (pre_selected_x_id == -1 && this.selected_x_id != -1)
+            {
+                FVM.selecting_cnt++;
+            }
         }
         if (Input.GetMouseButtonUp(0))
         {
             this.GetComponent<LineRenderer>().enabled = false;
-            this.mouse_pressed = false;
-            this.selected_x_id = -1;
+            if (this.selected_x_id != -1)
+            {
+                FVM.selecting_cnt--;
+                this.selected_x_id = -1;
+            }
         }
     }
 
-    // Update is called once per frame
+    void access_global_var()
+    {
+        var comp = GameObject.Find("Global Var").GetComponent<GlobalVariable>();
+        this.dt = comp.dt;
+        this.floor_restitution = comp.floor_restitution;
+        this.enable_stiction = comp.enable_stiction;
+        this.calculation_per_frame = comp.calculation_per_frame;
+        this.gravity = comp.gravity;
+    }
+
     void Update()
     {
-        this.hyper_model_name = this.hyper_model_name_map[this.hyper_model];
-        if (this.hyper_model != 0)
+        this.access_global_var();
+        this.model_name = this.model_name_map[this.model_idx];
+        if (this.last_model_used != this.model_idx)
         {
-            this.use_hyper = true;
+            // 为防止模型爆炸，可选：参数随模型切换而自动更改
+            if (this.auto_set_stiffness_when_model_changed)
+            {
+
+                this.stiffness_0 = this.model_default_params[this.model_idx][0];
+                this.stiffness_1 = this.model_default_params[this.model_idx][1];
+                this.stiffness_2 = this.model_default_params[this.model_idx][2];
+                this.stiffness_3 = this.model_default_params[this.model_idx][3];
+            }
+            this.last_model_used = this.model_idx;
+        }
+
+        if (this.model_idx != 0)
+        {
+            this.use_hyper_model = true;
         }
         this.handle_mouse_movement();
 
         for (int l = 0; l < this.calculation_per_frame; l++)
         {
-            // 每帧时间其实是 10 dt
             _Update();
         }
 
         // 上面只更新 X 不更新 mesh
-        // Dump the vertex array for rendering.
         Vector3[] vertices = new Vector3[tet_number * 12];
         int vertex_number = 0;
         for (int tet = 0; tet < tet_number; tet++)

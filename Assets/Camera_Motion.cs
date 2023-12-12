@@ -22,7 +22,7 @@ public class Camera_Motion : MonoBehaviour
         if (Input.GetMouseButtonUp(0))
             pressed = false;
 
-        if (pressed && GameObject.Find("House").GetComponent<FVM>().selected_x_id == -1)
+        if (pressed && FVM.selecting_cnt == 0)
         {
             {
 
